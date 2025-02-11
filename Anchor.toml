@@ -11,7 +11,7 @@ solbox_contract_devnet = "D7hxGNmozyBY4T5G2YttUh8ZbErGKXZzGd5z4749on5S"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "https://solana-devnet.g.alchemy.com/v2/19lueaGJPUy0UruxwkNbyLrN5GycbR-x"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
