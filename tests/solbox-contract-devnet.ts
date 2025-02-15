@@ -1,99 +1,264 @@
-// Deploy & Initialize Contract
-// Airdrop SOL to Users
-// Simulate Multiple Users Buying Gift Cards
-// Verify Spillover Mechanism (New referrals placed under correct users)
-// Validate Commission Distribution
-
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { SolboxContractDevnet } from "../target/types/solbox_contract_devnet";
-import { PublicKey, Keypair, SystemProgram, Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { PublicKey, Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { expect } from "chai";
-import { chunk } from "lodash";
+import { BN } from "bn.js";
 
-// Solana Devnet RPC
-const SOLANA_DEVNET_RPC = "https://api.devnet.solana.com";
-const connection = new Connection(SOLANA_DEVNET_RPC, "confirmed");
-const wallet = new anchor.Wallet(Keypair.generate()); // Dummy wallet
-const provider = new anchor.AnchorProvider(connection, wallet, { preflightCommitment: "confirmed" });
-anchor.setProvider(provider);
+describe("solbox-contract-devnet", () => {
+  // Constants for test configuration
+  const GIFT_CARD_AMOUNTS = [
+    new BN(200 * LAMPORTS_PER_SOL),
+    new BN(1000 * LAMPORTS_PER_SOL),
+    new BN(3000 * LAMPORTS_PER_SOL),
+  ];
+  const COMMISSION_PERCENTAGE = new BN(90);
+  const BONUS_PERCENTAGE = new BN(5);
+  const REFERRAL_LIMIT = 3;
 
-const program = anchor.workspace.SolboxContractDevnet as Program<SolboxContractDevnet>;
+  // Set up provider and program
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
 
-// Function to request SOL airdrop
-async function airdrop(publicKey: PublicKey, amount = 1 * LAMPORTS_PER_SOL) {
-  console.log(`Airdropping ${amount / LAMPORTS_PER_SOL} SOL to ${publicKey.toBase58()}...`);
-  try {
-    await connection.confirmTransaction(await connection.requestAirdrop(publicKey, amount));
-  } catch (error) {
-    console.error("Airdrop failed:", error);
-  }
-}
+  const program = anchor.workspace.SolboxContractDevnet as Program<SolboxContractDevnet>;
 
-describe("SolBox 1000 Users Stress Test", () => {
-  let solbox: Keypair;
+  // Test accounts
   let owner: Keypair;
-  let users: Keypair[] = [];
+  let solboxAccount: Keypair;
+  let user: Keypair;
+  let referrer: Keypair;
+
+  // Utility function to airdrop SOL
+  async function airdropSol(recipient: PublicKey, amount: number = 10) {
+    const signature = await provider.connection.requestAirdrop(
+      recipient,
+      amount * LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(signature);
+  }
+
+  // Utility function to get account balance
+  async function getBalance(pubkey: PublicKey): Promise<number> {
+    return provider.connection.getBalance(pubkey);
+  }
 
   before(async () => {
-    solbox = Keypair.generate();
+    // Generate test accounts
     owner = Keypair.generate();
-    users = Array.from({ length: 50 }, () => Keypair.generate());
+    solboxAccount = Keypair.generate();
+    user = Keypair.generate();
+    referrer = Keypair.generate();
 
-    console.log("⏳ Airdropping SOL to owner and users...");
-    await airdrop(owner.publicKey, 5 * LAMPORTS_PER_SOL);
-
-    for (const userBatch of chunk(users, 10)) {
-      await Promise.all(userBatch.map(user => airdrop(user.publicKey, 1 * LAMPORTS_PER_SOL)));
-      await new Promise(res => setTimeout(res, 2000)); // Avoid rate limits
-    }
-
-    console.log("🚀 Initializing SolBox contract...");
-    await program.rpc.initialize({
-      accounts: {
-        solbox: solbox.publicKey,
-        owner: owner.publicKey,
-        systemProgram: SystemProgram.programId,
-      },
-      signers: [solbox, owner],
-    });
-
-    const account = await program.account["solbox"].fetch(solbox.publicKey);
-    expect(account.totalSold.toNumber()).to.equal(0);
+    // Airdrop SOL to test accounts
+    await Promise.all([
+      airdropSol(owner.publicKey),
+      airdropSol(user.publicKey, 20),
+      airdropSol(referrer.publicKey),
+    ]);
   });
 
-  it("Simulates 1000 purchases with spillover", async () => {
-    console.log("🛒 Users buying gift cards...");
+  describe("Initialization", () => {
+    it("should successfully initialize the contract", async () => {
+      // Create initial config
+      const config = {
+        referralLimit: REFERRAL_LIMIT,
+        commissionPercentage: COMMISSION_PERCENTAGE,
+        bonusPercentage: BONUS_PERCENTAGE,
+        validAmounts: GIFT_CARD_AMOUNTS,
+      };
 
-    let referrals: Record<string, PublicKey> = {};
-    referrals[users[0].publicKey.toBase58()] = owner.publicKey; // First user referred by owner
+      try {
+        // Initialize contract
+        await program.methods
+          .initialize(config)
+          .accounts({
+            solbox: solboxAccount.publicKey,
+            owner: owner.publicKey,
+            system: anchor.web3.SystemProgram.programId,
+          })
+          .signers([owner, solboxAccount])
+          .rpc();
 
-    for (let i = 0; i < users.length; i++) {
-      let user = users[i];
-      let referrer = referrals[user.publicKey.toBase58()] || owner.publicKey; // Assign referrer
+        // Fetch and verify contract state
+        const account = await program.account.solBox.fetch(solboxAccount.publicKey);
+        
+        expect(account.owner.toString()).to.equal(owner.publicKey.toString());
+        expect(account.paused).to.be.false;
+        expect(account.totalSold.toNumber()).to.equal(0);
+        expect(account.totalCommissionDistributed.toNumber()).to.equal(0);
+        expect(account.referralCount.toNumber()).to.equal(0);
+        expect(account.config.referralLimit).to.equal(REFERRAL_LIMIT);
+        expect(account.config.commissionPercentage.eq(COMMISSION_PERCENTAGE)).to.be.true;
+        expect(account.config.bonusPercentage.eq(BONUS_PERCENTAGE)).to.be.true;
+        expect(account.referralRelationships).to.be.empty;
+      } catch (error) {
+        console.error("Initialization error:", error);
+        throw error;
+      }
+    });
 
-      await program.rpc.buyGiftCard(new anchor.BN(1_000_000_000), {
-        accounts: {
-          solbox: solbox.publicKey,
-          user: user.publicKey,
-          referrer: referrer,
-          systemProgram: SystemProgram.programId,
-        },
-        signers: [user],
-      });
+    it("should fail to initialize with invalid config", async () => {
+      const invalidConfig = {
+        referralLimit: 0,
+        commissionPercentage: new BN(90),
+        bonusPercentage: new BN(5),
+        validAmounts: GIFT_CARD_AMOUNTS,
+      };
 
-      console.log(`✅ User ${i + 1} (${user.publicKey.toBase58()}) bought a gift card. Referred by: ${referrer.toBase58()}`);
+      try {
+        await program.methods
+          .initialize(invalidConfig)
+          .accounts({
+            solbox: Keypair.generate().publicKey,
+            owner: owner.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([owner])
+          .rpc();
+        expect.fail("Should have failed with invalid config");
+      } catch (error) {
+        expect(error).to.be.an("error");
+      }
+    });
+  });
 
-      // Assign next users under this user to simulate spillover
-      if (i + 1 < users.length) referrals[users[i + 1].publicKey.toBase58()] = user.publicKey;
-      if (i + 2 < users.length) referrals[users[i + 2].publicKey.toBase58()] = user.publicKey;
-    }
+  describe("Gift Card Purchase", () => {
+    let initialUserBalance: number;
+    let initialReferrerBalance: number;
+    let initialContractBalance: number;
 
-    console.log("🔄 Fetching final contract state...");
-    const account = await program.account.solbox.fetch(solbox.publicKey);
+    beforeEach(async () => {
+      initialUserBalance = await getBalance(user.publicKey);
+      initialReferrerBalance = await getBalance(referrer.publicKey);
+      initialContractBalance = await getBalance(solboxAccount.publicKey);
+    });
 
-    expect(account.totalSold.toNumber()).to.equal(users.length * 1_000_000_000);
-    console.log(`🎉 Stress Test Passed! Total Sold: ${account.totalSold.toNumber() / LAMPORTS_PER_SOL} SOL`);
-    console.log(`💰 Total Commission Distributed: ${account.totalCommissionDistributed.toNumber() / LAMPORTS_PER_SOL} SOL`);
+    it("should successfully purchase a gift card", async () => {
+      const purchaseAmount = GIFT_CARD_AMOUNTS[0];
+      const expectedCommission = purchaseAmount.mul(COMMISSION_PERCENTAGE).div(new BN(100));
+      const expectedBonus = purchaseAmount.mul(BONUS_PERCENTAGE).div(new BN(100));
+
+      try {
+        await program.methods
+          .buyGiftCard(purchaseAmount)
+          .accounts({
+            solbox: solboxAccount.publicKey,
+            user: user.publicKey,
+            referrer: referrer.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([user])
+          .rpc();
+
+        // Verify contract state
+        const account = await program.account.solBox.fetch(solboxAccount.publicKey);
+        expect(account.totalSold.eq(purchaseAmount)).to.be.true;
+        expect(account.totalCommissionDistributed.eq(expectedCommission)).to.be.true;
+        expect(account.referralCount.toNumber()).to.equal(1);
+
+        // Verify balances
+        const finalUserBalance = await getBalance(user.publicKey);
+        const finalReferrerBalance = await getBalance(referrer.publicKey);
+        const finalContractBalance = await getBalance(solboxAccount.publicKey);
+
+        expect(finalUserBalance).to.be.lessThan(initialUserBalance - purchaseAmount.toNumber());
+        expect(finalReferrerBalance - initialReferrerBalance).to.equal(expectedCommission.toNumber());
+        expect(finalContractBalance - initialContractBalance)
+          .to.equal(purchaseAmount.sub(expectedCommission).sub(expectedBonus).toNumber());
+      } catch (error) {
+        console.error("Purchase error:", error);
+        throw error;
+      }
+    });
+
+    it("should fail with invalid amount", async () => {
+      const invalidAmount = new BN(150 * LAMPORTS_PER_SOL);
+
+      try {
+        await program.methods
+          .buyGiftCard(invalidAmount)
+          .accounts({
+            solbox: solboxAccount.publicKey,
+            user: user.publicKey,
+            referrer: referrer.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([user])
+          .rpc();
+        expect.fail("Should have failed with invalid amount");
+      } catch (error) {
+        expect(error).to.be.an("error");
+        expect(error.toString()).to.include("InvalidAmount");
+      }
+    });
+  });
+
+  describe("Contract Configuration", () => {
+    it("should update configuration when owner calls", async () => {
+      const newConfig = {
+        referralLimit: 5,
+        commissionPercentage: new BN(85),
+        bonusPercentage: new BN(7),
+        validAmounts: [
+          new BN(300 * LAMPORTS_PER_SOL),
+          new BN(1500 * LAMPORTS_PER_SOL),
+        ],
+      };
+
+      try {
+        await program.methods
+          .updateConfig(newConfig)
+          .accounts({
+            solbox: solboxAccount.publicKey,
+            owner: owner.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([owner])
+          .rpc();
+
+        const account = await program.account.solBox.fetch(solboxAccount.publicKey);
+        expect(account.config.referralLimit).to.equal(newConfig.referralLimit);
+        expect(account.config.commissionPercentage.eq(newConfig.commissionPercentage)).to.be.true;
+        expect(account.config.bonusPercentage.eq(newConfig.bonusPercentage)).to.be.true;
+      } catch (error) {
+        console.error("Config update error:", error);
+        throw error;
+      }
+    });
+  });
+
+  describe("Pause Functionality", () => {
+    it("should toggle pause state", async () => {
+      await program.methods
+        .togglePause()
+        .accounts({
+            solbox: solboxAccount.publicKey,
+            owner: owner.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([owner])
+        .rpc();
+
+      let account = await program.account.solBox.fetch(solboxAccount.publicKey);
+      expect(account.paused).to.be.true;
+
+      // Try purchase while paused
+      try {
+        await program.methods
+          .buyGiftCard(GIFT_CARD_AMOUNTS[0])
+          .accounts({
+            solbox: solboxAccount.publicKey,
+            user: user.publicKey,
+            referrer: referrer.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([user])
+          .rpc();
+        expect.fail("Should have failed while paused");
+      } catch (error) {
+        expect(error).to.be.an("error");
+        expect(error.toString()).to.include("ContractPaused");
+      }
+    });
   });
 });
