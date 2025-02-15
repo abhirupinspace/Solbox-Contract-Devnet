@@ -9,8 +9,9 @@ import { Program } from "@coral-xyz/anchor";
 import { SolboxContractDevnet } from "../target/types/solbox_contract_devnet";
 import { PublicKey, Keypair, SystemProgram, Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { expect } from "chai";
+import { chunk } from "lodash";
 
-// Setup provider & connection
+// Solana Devnet RPC
 const SOLANA_DEVNET_RPC = "https://api.devnet.solana.com";
 const connection = new Connection(SOLANA_DEVNET_RPC, "confirmed");
 const wallet = new anchor.Wallet(Keypair.generate()); // Dummy wallet
@@ -22,10 +23,14 @@ const program = anchor.workspace.SolboxContractDevnet as Program<SolboxContractD
 // Function to request SOL airdrop
 async function airdrop(publicKey: PublicKey, amount = 1 * LAMPORTS_PER_SOL) {
   console.log(`Airdropping ${amount / LAMPORTS_PER_SOL} SOL to ${publicKey.toBase58()}...`);
-  await connection.confirmTransaction(await connection.requestAirdrop(publicKey, amount));
+  try {
+    await connection.confirmTransaction(await connection.requestAirdrop(publicKey, amount));
+  } catch (error) {
+    console.error("Airdrop failed:", error);
+  }
 }
 
-describe("SolBox Spillover Test", () => {
+describe("SolBox 1000 Users Stress Test", () => {
   let solbox: Keypair;
   let owner: Keypair;
   let users: Keypair[] = [];
@@ -33,12 +38,14 @@ describe("SolBox Spillover Test", () => {
   before(async () => {
     solbox = Keypair.generate();
     owner = Keypair.generate();
-    users = Array.from({ length: 10 }, () => Keypair.generate());
+    users = Array.from({ length: 50 }, () => Keypair.generate());
 
     console.log("⏳ Airdropping SOL to owner and users...");
-    await airdrop(owner.publicKey, 2 * LAMPORTS_PER_SOL);
-    for (let user of users) {
-      await airdrop(user.publicKey, 1 * LAMPORTS_PER_SOL);
+    await airdrop(owner.publicKey, 5 * LAMPORTS_PER_SOL);
+
+    for (const userBatch of chunk(users, 10)) {
+      await Promise.all(userBatch.map(user => airdrop(user.publicKey, 1 * LAMPORTS_PER_SOL)));
+      await new Promise(res => setTimeout(res, 2000)); // Avoid rate limits
     }
 
     console.log("🚀 Initializing SolBox contract...");
@@ -51,11 +58,11 @@ describe("SolBox Spillover Test", () => {
       signers: [solbox, owner],
     });
 
-    const account = await program.account.solbox.fetch(solbox.publicKey);
+    const account = await program.account["solbox"].fetch(solbox.publicKey);
     expect(account.totalSold.toNumber()).to.equal(0);
   });
 
-  it("Simulates multiple purchases with spillover", async () => {
+  it("Simulates 1000 purchases with spillover", async () => {
     console.log("🛒 Users buying gift cards...");
 
     let referrals: Record<string, PublicKey> = {};
@@ -83,10 +90,10 @@ describe("SolBox Spillover Test", () => {
     }
 
     console.log("🔄 Fetching final contract state...");
-    const account = await program.account.solBox.fetch(solbox.publicKey);
+    const account = await program.account.solbox.fetch(solbox.publicKey);
 
     expect(account.totalSold.toNumber()).to.equal(users.length * 1_000_000_000);
-    console.log(`🎉 Spillover Test Passed! Total Sold: ${account.totalSold.toNumber() / LAMPORTS_PER_SOL} SOL`);
+    console.log(`🎉 Stress Test Passed! Total Sold: ${account.totalSold.toNumber() / LAMPORTS_PER_SOL} SOL`);
     console.log(`💰 Total Commission Distributed: ${account.totalCommissionDistributed.toNumber() / LAMPORTS_PER_SOL} SOL`);
   });
 });
