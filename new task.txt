@@ -1,0 +1,8 @@
+- when user upgrades package he should pay the difference (need upgrade package function)
+- fetch user's total earnings from commissions
+- fix scalability issue
+- admin should be able to give a user any package without user paying for that package
+- admin should be able to change commissions %
+- admin should also be able to change if commission is paid upto 15 levels or 10 levels, etc.
+- remaining money that is not distributed in commission should go to founder wallet address. (need to set founder wallet during initialize)
+- admin can see blacklisted addresses and can add or remove addresses to blacklist
